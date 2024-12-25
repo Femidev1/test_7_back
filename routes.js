@@ -36,4 +36,20 @@ router.get('/user/:telegramId', async (req, res) => {
     }
 });
 
+// Update Points
+router.post('/user/:telegramId', async (req, res) => {
+    try {
+        const { points } = req.body;
+        const user = await User.findOneAndUpdate(
+            { telegramId: req.params.telegramId },
+            { points },
+            { new: true }
+        );
+        if (!user) return res.status(404).json({ message: 'User not found' });
+        res.json(user);
+    } catch (error) {
+        res.status(500).json({ message: 'Server error', error });
+    }
+});
+
 module.exports = router;
