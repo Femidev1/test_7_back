@@ -52,4 +52,36 @@ router.post('/user/:telegramId', async (req, res) => {
     }
 });
 
+
+//Leaderboard Routes
+// Fetch Leaderboard
+router.get('/leaderboard', async (req, res) => {
+    try {
+        const { limit = 10 } = req.query; // Default limit to 10 users
+        const users = await User.find()
+            .sort({ points: -1 }) // Sort by points in descending order
+            .limit(parseInt(limit)); // Limit results
+        res.json(users);
+    } catch (error) {
+        res.status(500).json({ message: 'Server error', error });
+    }
+});
+
+// Seed test data for leaderboard
+router.post('/seed', async (req, res) => {
+    try {
+        const testData = [
+            { telegramId: "1", username: "Leader1", points: 500, characterUrl: "url1.png" },
+            { telegramId: "2", username: "Leader2", points: 450, characterUrl: "url2.png" },
+            { telegramId: "3", username: "Leader3", points: 400, characterUrl: "url3.png" },
+            { telegramId: "4", username: "Player", points: 300, characterUrl: "url4.png" }
+        ];
+
+        await User.insertMany(testData); // Seed new data
+        res.status(201).json({ message: "Test data seeded successfully" });
+    } catch (error) {
+        res.status(500).json({ message: 'Server error', error });
+    }
+});
+
 module.exports = router;
