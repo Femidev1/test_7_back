@@ -9,6 +9,7 @@ const User = require("./models/user");
 const Quest = require("./models/quests");
 const ShopItem = require("./models/shopItem");
 const UserInventory = require("./models/userInventory");
+const Friend = require("./models/friends");
 
 // Imported Utils
 const generateInGameQuests = require("./utils/questGenerator"); // Update path if needed
@@ -38,69 +39,88 @@ router.get("/user/:telegramId", async (req, res) => {
   }
 });
 
-/**
- * POST /user/:telegramId
- * Updates the user's points with a specific amount.
- */
-router.post("/user/:telegramId", async (req, res) => {
-  const { telegramId } = req.params; // Telegram ID from the URL
-  const { points } = req.body; // Points to update in the request body
-
-  try {
-    // Validate payload
-    if (!telegramId || typeof points !== "number") {
-      return res
-        .status(400)
-        .json({ message: "Invalid payload. Provide a valid telegramId and points." });
-    }
-
-    // Find the user
-    const user = await User.findOne({ telegramId });
-    if (!user) {
-      return res.status(404).json({ message: "User not found." });
-    }
-
-    // Update user's points
-    user.points += points;
-    user.pointsToday += points;
-
-    // Save the updated user
-    await user.save();
-
-    res.status(200).json({
-      message: "User points updated successfully.",
-      totalPoints: user.points,
-      pointsToday: user.pointsToday,
-    });
-  } catch (error) {
-    console.error("Error updating points:", error.message);
-    res.status(500).json({ message: "Failed to update points.", error: error.message });
-  }
-});
 
 /**
  * POST /user
  * Creates a new user with Telegram details in the existing User collection.
+ * Handles referral logic if referralCode is provided.
  */
 router.post("/user", async (req, res) => {
   try {
-    const { telegramId, username, firstName, lastName, languageCode } = req.body;
+    const { telegramId, username, firstName, lastName, languageCode, referralCode } = req.body;
 
+    // Check if user already exists
     let user = await User.findOne({ telegramId });
     if (user) {
       return res.status(400).json({ message: "User already exists" });
     }
 
-    user = new User({
-      telegramId,
-      username,
-      firstName,
-      lastName,
-      languageCode,
-    });
-    await user.save();
+    // Start a session for transaction
+    const session = await mongoose.startSession();
+    session.startTransaction();
 
-    res.status(201).json({ message: "User saved successfully", user });
+    try {
+      // Create new user
+      user = new User({
+        telegramId,
+        username,
+        firstName,
+        lastName,
+        languageCode,
+      });
+
+      await user.save({ session });
+
+      // Create a UserInventory for the new user
+      const userInventory = new UserInventory({
+        userId: user._id,
+        items: [] // Initialize with an empty items array or default items if needed
+      });
+      await userInventory.save({ session });
+
+      // Handle referral if referralCode is provided
+      if (referralCode) {
+        const inviter = await User.findOne({ telegramId: referralCode }).session(session);
+        if (inviter) {
+          // Prevent self-referral
+          if (!inviter._id.equals(user._id)) {
+            // Check if they are already friends
+            const existingFriendship = await Friend.findOne({ userId: inviter._id, friendId: user._id }).session(session);
+            if (!existingFriendship) {
+              // Create bidirectional friendship
+              await Friend.create(
+                [
+                  { userId: inviter._id, friendId: user._id },
+                  { userId: user._id, friendId: inviter._id },
+                ],
+                { session }
+              );
+
+              // Reward inviter and invitee
+              inviter.friendsCount += 1;
+              inviter.referralTokensEarned += 50000; // Reward for inviter
+              user.points += 50000; // Reward for invitee
+              inviter.points += 50000;
+              // Save both users within the session
+              await inviter.save({ session });
+              await user.save({ session });
+            }
+          }
+        }
+      }
+
+      // Commit the transaction
+      await session.commitTransaction();
+      session.endSession();
+
+      res.status(201).json({ message: "User saved successfully", user });
+    } catch (error) {
+      // Abort the transaction in case of error
+      await session.abortTransaction();
+      session.endSession();
+      console.error("Error creating user with referral:", error);
+      res.status(500).json({ message: "Server error", error: error.message });
+    }
   } catch (error) {
     console.error("Error creating user:", error);
     res.status(500).json({ message: "Server error", error });
@@ -408,7 +428,7 @@ router.post("/quests/:questId/claim", async (req, res) => {
 
 /**
  * GET /shop
- * Returns all shop items with locked/unlocked status for the user.
+ * Returns all shop items with locked/unlocked status and additional details for the user.
  */
 router.get("/shop", async (req, res) => {
   try {
@@ -427,7 +447,7 @@ router.get("/shop", async (req, res) => {
     // Fetch all shop items
     const shopItems = await ShopItem.find();
 
-    // Map shop items with locked/unlocked status
+    // Map shop items with locked/unlocked status and additional details
     const itemsWithStatus = shopItems.map((item) => {
       const inventoryItem = userInventory
         ? userInventory.items.find(
@@ -438,6 +458,11 @@ router.get("/shop", async (req, res) => {
       return {
         ...item.toObject(),
         locked: inventoryItem ? inventoryItem.locked : true,
+        level: inventoryItem ? inventoryItem.level : 0, // Default to 0 if not owned
+        pointsPerCycle: inventoryItem ? inventoryItem.pointsPerCycle : 0, // Default to 0
+        upgradeCost: inventoryItem
+          ? Math.floor(item.baseCost * Math.pow(item.upgradeMultiplier, inventoryItem.level))
+          : item.baseCost, // Calculate upgrade cost if owned, else base cost
       };
     });
 
@@ -445,68 +470,6 @@ router.get("/shop", async (req, res) => {
   } catch (error) {
     console.error("Error fetching shop items:", error);
     res.status(500).json({ message: "Failed to fetch shop items" });
-  }
-});
-
-/**
- * POST /shop/purchase
- * Purchases a shop item for the user using user.points, marks item locked=false in inventory
- */
-router.post("/shop/purchase", async (req, res) => {
-  const { userId, itemId } = req.body; // `userId` is the telegramId
-
-  try {
-    // Find the user by their telegramId
-    const user = await User.findOne({ telegramId: userId });
-    if (!user) return res.status(404).json({ message: "User not found" });
-
-    // Fetch the shop item being purchased
-    const shopItem = await ShopItem.findById(itemId);
-    if (!shopItem) return res.status(404).json({ message: "Item not found" });
-
-    // Fetch or create the user's inventory
-    let userInventory = await UserInventory.findOne({ userId: user._id });
-    if (!userInventory) {
-      userInventory = new UserInventory({ userId: user._id, items: [] });
-    }
-
-    // Check if the item is already owned
-    const ownedItem = userInventory.items.find(
-      (invItem) => invItem.itemId.toString() === itemId
-    );
-    if (ownedItem) {
-      return res.status(400).json({ message: "Item already owned" });
-    }
-
-    // Ensure the user has enough points
-    const itemCost = shopItem.baseCost;
-    if (user.points < itemCost) {
-      return res
-        .status(400)
-        .json({ message: "Insufficient points to purchase this item" });
-    }
-
-    // Deduct the item's cost from the user's points
-    user.points -= itemCost;
-
-    // Add the purchased item to the user's inventory with locked: false
-    userInventory.items.push({
-      itemId,
-      level: 1,
-      pointsPerCycle: shopItem.basePoints,
-      locked: false, // item is now unlocked
-    });
-
-    // Save the updated user and inventory
-    await user.save();
-    await userInventory.save();
-
-    res
-      .status(200)
-      .json({ message: "Item purchased successfully", inventory: userInventory });
-  } catch (error) {
-    console.error("Error purchasing item:", error);
-    res.status(500).json({ message: "Failed to purchase item" });
   }
 });
 
@@ -544,6 +507,8 @@ router.post("/shop/upgrade", async (req, res) => {
     const upgradedPoints =
       shopItem.basePoints * Math.pow(shopItem.upgradeMultiplier, item.level);
 
+    console.log(`Upgrade Cost: ${upgradeCost}, Upgraded Points: ${upgradedPoints}`);
+
     // Deduct points from user
     if (user.points < upgradeCost) {
       return res
@@ -555,16 +520,113 @@ router.post("/shop/upgrade", async (req, res) => {
 
     // Upgrade the item
     item.level += 1;
-    item.pointsPerCycle = upgradedPoints;
+    item.pointsPerCycle = Math.floor(upgradedPoints);
+
+    console.log(
+      `Item ${itemId} upgraded to level ${item.level} with pointsPerCycle ${item.pointsPerCycle}`
+    );
 
     // Save changes
     await user.save();
     await userInventory.save();
 
-    res.status(200).json({ message: "Item upgraded successfully", item });
+    // Fetch the updated shop item details to send back to frontend
+    const updatedInventoryItem = userInventory.items.find(
+      (invItem) => invItem.itemId.toString() === itemId
+    );
+
+    // Optionally, populate shop item details for comprehensive data
+    const populatedItem = await ShopItem.findById(itemId).lean();
+
+    res.status(200).json({
+      message: "Item upgraded successfully",
+      item: {
+        ...populatedItem,
+        locked: updatedInventoryItem.locked,
+        level: updatedInventoryItem.level,
+        pointsPerCycle: updatedInventoryItem.pointsPerCycle,
+      },
+    });
   } catch (error) {
     console.error("Error upgrading item:", error);
     res.status(500).json({ message: "Failed to upgrade item" });
+  }
+});
+
+
+/**
+ * POST /shop/purchase
+ * Purchases a shop item for the user using user.points, marks item locked=false in inventory
+ */
+router.post("/shop/purchase", async (req, res) => {
+  const { userId, itemId } = req.body; // userId is telegramId
+
+  try {
+    // Find the user by telegramId
+    const user = await User.findOne({ telegramId: userId });
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    // Fetch the shop item being purchased
+    const shopItem = await ShopItem.findById(itemId);
+    if (!shopItem) return res.status(404).json({ message: "Item not found" });
+
+    // Fetch or create the user's inventory
+    let userInventory = await UserInventory.findOne({ userId: user._id });
+    if (!userInventory) {
+      userInventory = new UserInventory({ userId: user._id, items: [] });
+    }
+
+    // Check if the item is already owned
+    const ownedItem = userInventory.items.find(
+      (invItem) => invItem.itemId.toString() === itemId
+    );
+    if (ownedItem) {
+      return res.status(400).json({ message: "Item already owned" });
+    }
+
+    // Ensure the user has enough points
+    const itemCost = shopItem.baseCost;
+    if (user.points < itemCost) {
+      return res
+        .status(400)
+        .json({ message: "Insufficient points to purchase this item" });
+    }
+
+    // Deduct the item's cost from the user's points
+    user.points -= itemCost;
+
+    // Add the purchased item to the user's inventory with locked: false and level: 1
+    userInventory.items.push({
+      itemId,
+      level: 1,
+      pointsPerCycle: shopItem.basePoints,
+      locked: false, // item is now unlocked
+    });
+
+    // Save the updated user and inventory
+    await user.save();
+    await userInventory.save();
+
+    // Fetch the updated shop item details to send back to frontend
+    const updatedInventoryItem = userInventory.items.find(
+      (invItem) => invItem.itemId.toString() === itemId
+    );
+
+    // Optionally, populate shop item details for comprehensive data
+    const populatedItem = await ShopItem.findById(itemId).lean();
+
+    res.status(200).json({
+      message: "Item purchased successfully",
+      item: {
+        ...populatedItem,
+        locked: updatedInventoryItem.locked,
+        level: updatedInventoryItem.level,
+        pointsPerCycle: updatedInventoryItem.pointsPerCycle,
+      },
+    });
+  } catch (error) {
+    console.error("Error purchasing item:", error);
+    res.status(500).json({ message: "Failed to purchase item" });
   }
 });
 
@@ -580,10 +642,11 @@ router.post("/mine", async (req, res) => {
     const user = await User.findOne({ telegramId });
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    // Find the user's inventory
-    const userInventory = await UserInventory.findOne({ userId: user._id });
+    // Find the user's inventory, create if it doesn't exist
+    let userInventory = await UserInventory.findOne({ userId: user._id });
     if (!userInventory) {
-      return res.status(404).json({ message: "User inventory not found" });
+      userInventory = new UserInventory({ userId: user._id, items: [] });
+      await userInventory.save();
     }
 
     // Calculate auto-mined points from inventory
@@ -614,12 +677,22 @@ router.post("/mine", async (req, res) => {
   }
 });
 
+
+const rateLimit = require("express-rate-limit");
+
+// Define rate limiter for taps
+const tapsLimiter = rateLimit({
+  windowMs: 1 * 1000, // 1 second window
+  max: 60, // limit each IP to 20 requests per windowMs
+  message: "Too many taps from this IP, please try again later.",
+});
+
 /**
  * POST /taps
- * Increment tapsToday and pointsToday for the user
+ * Increment tapsToday and pointsToday for the user in batches.
  */
-router.post("/taps", async (req, res) => {
-  const { telegramId, increment } = req.body;
+router.post("/taps", tapsLimiter, async (req, res) => {
+  const { telegramId, increment } = req.body; // `increment` can be >1 for batch taps
 
   // Validate input
   if (!telegramId || !Number.isInteger(increment) || increment <= 0) {
@@ -629,30 +702,77 @@ router.post("/taps", async (req, res) => {
   }
 
   try {
+    // Perform atomic update using $inc
+    const updatedUser = await User.findOneAndUpdate(
+      { telegramId },
+      {
+        $inc: {
+          tapsToday: increment,
+          pointsToday: increment,
+          points: increment,
+        },
+      },
+      { new: true } // Return the updated document
+    );
+
+    if (!updatedUser) {
+      return res.status(404).json({ message: "User not found." });
+    }
+
+    // Respond with updated stats
+    res.status(200).json({
+      message: "Taps and points incremented successfully.",
+      tapsToday: updatedUser.tapsToday,
+      pointsToday: updatedUser.pointsToday,
+      totalPoints: updatedUser.points,
+    });
+  } catch (error) {
+    console.error("Error logging taps:", error.message);
+    res.status(500).json({ message: "Failed to log taps.", error: error.message });
+  }
+});
+
+/**
+ * GET /friends/:telegramId
+ * Retrieves a list of friends for the given Telegram ID.
+ */
+router.get("/friends/:telegramId", async (req, res) => {
+  try {
+    const { telegramId } = req.params;
+    console.log(`Fetching friends for Telegram ID: ${telegramId}`);
+
+    // Step 1: Find the user by telegramId
     const user = await User.findOne({ telegramId });
+    console.log("User found:", user);
+
     if (!user) {
       return res.status(404).json({ message: "User not found." });
     }
 
-    // Increment counters
-    user.tapsToday += increment;
-    user.pointsToday += increment;
-    user.points += increment;
+    // Step 2: Find the user's friends
+    const friends = await Friend.find({ userId: user._id })
+      .populate("friendId", "username points galaxyLevel")
+      .exec();
+    console.log("Friends retrieved:", friends);
 
-    // Save the user
-    await user.save();
+    // Step 3: Handle case where no friends are found
+    if (!friends || friends.length === 0) {
+      return res.status(200).json({ friends: [] });
+    }
 
-    // Respond with updated stats
-    res.status(200).json({
-      message: "Tap and points incremented successfully.",
-      tapsToday: user.tapsToday,
-      pointsToday: user.pointsToday,
-      totalPoints: user.points,
-    });
+    // Step 4: Return the friends list
+    res.status(200).json({ friends });
   } catch (error) {
-    console.error("Error logging tap:", error.message);
-    res.status(500).json({ message: "Failed to log taps.", error: error.message });
+    console.error("Error fetching friends list:", error);
+    res.status(500).json({ message: "Error fetching friends list.", error: error.message });
   }
 });
+
+router.get("/referral/:telegramId", (req, res) => {
+  const { telegramId } = req.params;
+  const referralLink = `https://yourapp.com/signup?ref=${telegramId}`;
+  res.status(200).json({ referralLink });
+});
+
 
 module.exports = router;

@@ -9,14 +9,21 @@ const UserSchema = new mongoose.Schema({
   languageCode: { type: String },
   points: { type: Number, default: 0 },
   characterUrl: { type: String, default: "" },
+  galaxyLevel: { type: Number, default: 1 }, // Add this line,
 
-  items: [
-    {
-      itemId: { type: mongoose.Schema.Types.ObjectId, ref: "ShopItem", required: true },
-      level: { type: Number, default: 1 },
-      pointsPerCycle: { type: Number, required: true },
-    },
-  ],
+  invitedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+    default: null,
+  },
+  friendsCount: {
+    type: Number,
+    default: 0,
+  },
+  referralTokensEarned: {
+    type: Number,
+    default: 0,
+  },
 
   // Daily Counters
   pointsToday: { type: Number, default: 0 },
