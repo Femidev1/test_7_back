@@ -11,6 +11,11 @@ const UserSchema = new mongoose.Schema({
   characterUrl: { type: String, default: "" },
   galaxyLevel: { type: Number, default: 1 }, // Add this line,
 
+  // Daily Reward Fields
+  lastDailyReward: { type: Date, default: null },
+  dailyStreak: { type: Number, default: 0 },
+  claimedDailyRewards: { type: [String], default: [] }, 
+
   invitedBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "User",

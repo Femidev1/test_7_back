@@ -6,17 +6,10 @@ const mongoose = require("mongoose");
 const questSchema = new mongoose.Schema({
   title: { type: String, required: true },
   description: { type: String, required: true },
-  type: { type: String, enum: ["in-game", "external"], required: true },
+  type: { type: String, enum: ["in-game", "external", "social"], required: true },
   nature: { type: String, enum: ["tap-based", "points-based", "social"], required: true },
-  target: {
-    type: Number,
-    required: true,
-    validate: {
-      validator: Number.isInteger,
-      message: '{VALUE} is not an integer value',
-    },
-    min: [1, 'Target must be at least 1'],
-  },
+  target: { type: Number, required: function () { return this.nature !== "social"; } }, // Optional for "social" quests
+  condition: { type: String, required: function () { return this.nature === "social"; } }, // For "social" quests
   reward: { type: Number, required: true },
   imageURL: { type: String },
   expiresAt: { type: Date, required: true },

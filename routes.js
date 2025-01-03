@@ -12,7 +12,7 @@ const UserInventory = require("./models/userInventory");
 const Friend = require("./models/friends");
 
 // Imported Utils
-const generateInGameQuests = require("./utils/questGenerator"); // Update path if needed
+const { seedDailyQuests } = require("./utils/manualQuestSeeder");
 
 /**
  * GET /user/:telegramId
@@ -147,60 +147,60 @@ router.get("/leaderboard", async (req, res) => {
 });
 
 /**
- * Fetch all available quests and auto-manage
+ * Fetch all available quests and prioritize social quests
  * GET /quests
  */
 router.get("/quests", async (req, res) => {
   try {
-    const { telegramId } = req.query; // Pass telegramId to determine claim status
+    const { telegramId, limit = 10 } = req.query; 
     const today = new Date();
-    today.setHours(0, 0, 0, 0); // Start of today
+    today.setHours(0, 0, 0, 0); // Start of day
 
-    // Remove quests from the previous day
-    const deleted = await Quest.deleteMany({ generationDate: { $lt: today } });
-    console.log(`Deleted ${deleted.deletedCount} quests from previous days.`);
+    // 1. Just find today's quests from the Quest collection (manual quest seeder already inserted them)
+    let availableQuests = await Quest.find({ generationDate: today }).lean();
 
-    // Check if quests have already been generated for today
-    const questsForToday = await Quest.find({ generationDate: today });
-    console.log(`Quests for today before generation: ${questsForToday.length}`);
-
-    if (questsForToday.length === 0) {
-      // Generate new quests for today
-      await generateInGameQuests(); // Ensure this generates all quest types
+    // 2. If no quests seeded, you can optionally call seedDailyQuests() here,
+    //    or just respond with an empty list. 
+    //    If you want them auto-created, uncomment next lines:
+    /*
+    if (availableQuests.length === 0) {
+      await seedDailyQuests();
+      availableQuests = await Quest.find({ generationDate: today }).lean();
     }
+    */
 
-    // Fetch all quests for today without limiting
-    const availableQuests = await Quest.find({ generationDate: today })
-      .sort({ expiresAt: 1 }); // Removed .limit()
-    
-    console.log(`Total quests fetched for today: ${availableQuests.length}`);
-    availableQuests.forEach((quest, index) => {
-      console.log(`${index + 1}. [${quest.nature}] ${quest.title}`);
+    // 3. Sort them or limit them if you want
+    const questOrder = ["social", "points-based", "tap-based"];
+    availableQuests.sort((a, b) => {
+      return questOrder.indexOf(a.nature) - questOrder.indexOf(b.nature);
     });
+    availableQuests = availableQuests.slice(0, parseInt(limit, 10));
 
+    // 4. If telegramId provided, find user and figure out claimed statuses
     let user = null;
-
     if (telegramId) {
-      // Fetch the user by telegramId
-      user = await User.findOne({ telegramId }).populate("claimedSocialQuests pendingSocialQuestClaims");
+      user = await User.findOne({ telegramId })
+        .populate("claimedSocialQuests pendingSocialQuestClaims");
     }
 
-    // Map quests with claim status
+    // 5. Map each quest with user’s claim info
     const questsWithStatus = availableQuests.map((quest) => {
       let isClaimed = false;
       let isPending = false;
 
       if (user) {
+        // Already claimed social quest?
         isClaimed = user.claimedSocialQuests.some(
           (claimedQuest) => claimedQuest._id.toString() === quest._id.toString()
         );
+        // Or pending?
         isPending = user.pendingSocialQuestClaims.some(
           (pendingQuest) => pendingQuest._id.toString() === quest._id.toString()
         );
       }
 
       return {
-        ...quest.toObject(),
+        ...quest,
         isClaimed,
         isPending,
       };
@@ -413,7 +413,7 @@ router.post("/quests/:questId/claim", async (req, res) => {
       session.endSession();
 
       res.status(200).json({
-        message: "Quest claimed successfully and removed from the database.",
+        message: "Quest claimed successfully",
         points: user.points,
       });
     } catch (error) {
@@ -501,29 +501,38 @@ router.post("/shop/upgrade", async (req, res) => {
     const shopItem = await ShopItem.findById(itemId);
     if (!shopItem) return res.status(404).json({ message: "Item not found" });
 
-    // Calculate upgrade cost and points
+    // Calculate upgrade cost
     const upgradeCost =
       shopItem.baseCost * Math.pow(shopItem.upgradeMultiplier, item.level);
+
+    // Calculate upgraded points based on the new level after upgrade
+    const newLevel = item.level + 1;
     const upgradedPoints =
-      shopItem.basePoints * Math.pow(shopItem.upgradeMultiplier, item.level);
+      shopItem.basePoints * Math.pow(shopItem.upgradeMultiplier, newLevel);
 
     console.log(`Upgrade Cost: ${upgradeCost}, Upgraded Points: ${upgradedPoints}`);
 
-    // Deduct points from user
+    // Check if the user has enough points
     if (user.points < upgradeCost) {
       return res
         .status(400)
         .json({ message: "Insufficient points to upgrade this item" });
     }
 
+    // Deduct points from user
     user.points -= upgradeCost;
 
     // Upgrade the item
-    item.level += 1;
+    item.level = newLevel;
     item.pointsPerCycle = Math.floor(upgradedPoints);
 
     console.log(
       `Item ${itemId} upgraded to level ${item.level} with pointsPerCycle ${item.pointsPerCycle}`
+    );
+
+    // Calculate the new upgrade cost for the next level
+    const newUpgradeCost = Math.floor(
+      shopItem.baseCost * Math.pow(shopItem.upgradeMultiplier, item.level)
     );
 
     // Save changes
@@ -545,6 +554,7 @@ router.post("/shop/upgrade", async (req, res) => {
         locked: updatedInventoryItem.locked,
         level: updatedInventoryItem.level,
         pointsPerCycle: updatedInventoryItem.pointsPerCycle,
+        upgradeCost: newUpgradeCost, // Include the new upgrade cost
       },
     });
   } catch (error) {
@@ -599,7 +609,7 @@ router.post("/shop/purchase", async (req, res) => {
     userInventory.items.push({
       itemId,
       level: 1,
-      pointsPerCycle: shopItem.basePoints,
+      pointsPerCycle: shopItem.basePoints * Math.pow(shopItem.upgradeMultiplier, 1),
       locked: false, // item is now unlocked
     });
 
@@ -683,7 +693,7 @@ const rateLimit = require("express-rate-limit");
 // Define rate limiter for taps
 const tapsLimiter = rateLimit({
   windowMs: 1 * 1000, // 1 second window
-  max: 60, // limit each IP to 20 requests per windowMs
+  max: 60, // limit each IP to 60 requests per windowMs
   message: "Too many taps from this IP, please try again later.",
 });
 
@@ -774,5 +784,173 @@ router.get("/referral/:telegramId", (req, res) => {
   res.status(200).json({ referralLink });
 });
 
+// routes.js (Modify the existing /daily-reward route)
+router.post("/daily-reward", async (req, res) => {
+  try {
+    const { telegramId } = req.body;
+
+    if (!telegramId) {
+      return res.status(400).json({ message: "Telegram ID is required." });
+    }
+
+    // Find the user by telegramId
+    const user = await User.findOne({ telegramId });
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found." });
+    }
+
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+    let lastRewardDate = user.lastDailyReward
+      ? new Date(
+          user.lastDailyReward.getFullYear(),
+          user.lastDailyReward.getMonth(),
+          user.lastDailyReward.getDate()
+        )
+      : null;
+
+    // Calculate the difference in days
+    const oneDayMs = 24 * 60 * 60 * 1000;
+    let daysDifference = lastRewardDate
+      ? Math.floor((today - lastRewardDate) / oneDayMs)
+      : null;
+
+    if (lastRewardDate) {
+      if (daysDifference === 0) {
+        return res.status(400).json({
+          message: "Daily reward already claimed today.",
+          claimedDays: user.claimedDays,
+        });
+      } else if (daysDifference === 1) {
+        // Continue the streak
+        user.dailyStreak += 1;
+      } else {
+        // Streak broken
+        user.dailyStreak = 1;
+        user.claimedDailyRewards = []; // Reset claimed days
+      }
+    } else {
+      // First time claiming
+      user.dailyStreak = 1;
+      user.claimedDailyRewards = []; // Initialize claimed days
+    }
+
+    // Determine reward based on streak
+    const rewardConfig = {
+      1: 100,
+      2: 150,
+      3: 200,
+      4: 250,
+      5: 300,
+      6: 350,
+      7: 500, // Maximum streak reward
+    };
+
+    const streak = user.dailyStreak > 7 ? 7 : user.dailyStreak;
+    const rewardPoints = rewardConfig[streak] || 100; // Default to 100 if undefined
+
+    // Update user's points and lastDailyReward
+    user.points += rewardPoints;
+    user.lastDailyReward = now;
+
+    // Add today's date to claimedDailyRewards
+    const todayString = today.toISOString().split("T")[0];
+    if (!user.claimedDailyRewards.includes(todayString)) {
+      user.claimedDailyRewards.push(todayString);
+    }
+
+    // Save the user
+    await user.save();
+
+    res.status(200).json({
+      message: `Daily reward claimed successfully! You received ${rewardPoints} points.`,
+      pointsEarned: rewardPoints,
+      totalPoints: user.points,
+      currentStreak: user.dailyStreak,
+      claimedDays: user.claimedDailyRewards,
+    });
+  } catch (error) {
+    console.error("Error claiming daily reward:", error);
+    res.status(500).json({
+      message: "Failed to claim daily reward.",
+      error: error.message,
+    });
+  }
+});
+
+// routes.js (Add this new route)
+router.get("/daily-rewards/:telegramId", async (req, res) => {
+  try {
+    const { telegramId } = req.params;
+
+    if (!telegramId) {
+      return res.status(400).json({ message: "Telegram ID is required." });
+    }
+
+    // Find the user by telegramId
+    const user = await User.findOne({ telegramId });
+    if (!user) {
+      return res.status(404).json({ message: "User not found." });
+    }
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0); // Normalize to start of day
+
+    // Define the 7 daily rewards
+    const rewardConfig = [
+      { day: 1, reward: 100 },
+      { day: 2, reward: 150 },
+      { day: 3, reward: 200 },
+      { day: 4, reward: 250 },
+      { day: 5, reward: 300 },
+      { day: 6, reward: 350 },
+      { day: 7, reward: 500 },
+    ];
+
+    // Generate the past 7 days including today
+    const pastSevenDays = [];
+    for (let i = 6; i >= 0; i--) {
+      const date = new Date(today);
+      date.setDate(today.getDate() - i);
+      const dateString = date.toISOString().split("T")[0]; // "YYYY-MM-DD"
+      pastSevenDays.push(dateString);
+    }
+
+    // Create a Set of claimed dates for faster lookup
+    const claimedDatesSet = new Set(user.claimedDailyRewards || []);
+
+    // Map each day to its claimed status
+    const rewards = pastSevenDays.map((dateString, index) => ({
+      day: index + 1, // 1 to 7
+      date: dateString,
+      reward: rewardConfig[index].reward,
+      claimed: claimedDatesSet.has(dateString),
+    }));
+
+    res.status(200).json({
+      rewards,
+      currentStreak: user.dailyStreak || 0,
+    });
+  } catch (error) {
+    console.error("Error fetching daily rewards:", error);
+    res.status(500).json({ message: "Error fetching daily rewards.", error });
+  }
+});
+
+/**
+ * POST /seed-manual-quests
+ * Manually seeds today's quests from the daily templates and assigns them to all users.
+ */
+router.post("/seed-manual-quests", async (req, res) => {
+  try {
+    await seedDailyQuests();
+    res.status(200).json({ message: "Daily quests seeded (if not already)!" });
+  } catch (error) {
+    console.error("Error seeding daily quests:", error);
+    res.status(500).json({ message: "Failed to seed daily quests", error: error.message });
+  }
+});
 
 module.exports = router;
