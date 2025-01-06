@@ -68,6 +68,7 @@ router.post("/user", async (req, res) => {
         languageCode,
         points: 0,         // or any initial value
         characterUrl: "",  // will update below with default companion
+        avatarURL,  // Store the profile image URL
       });
 
       await user.save({ session });
