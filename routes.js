@@ -1,8 +1,8 @@
 // routes.js
-
 const express = require("express");
 const router = express.Router();
 const mongoose = require("mongoose");
+const rateLimit = require("express-rate-limit");
 
 // Import your Mongoose models
 const User = require("./models/user");
@@ -39,11 +39,10 @@ router.get("/user/:telegramId", async (req, res) => {
   }
 });
 
-
 /**
  * POST /user
  * Creates a new user with Telegram details in the existing User collection.
- * Handles referral logic if referralCode is provided.
+ * Handles referral logic if referralCode is provided, and also assigns a default companion.
  */
 router.post("/user", async (req, res) => {
   try {
@@ -67,16 +66,46 @@ router.post("/user", async (req, res) => {
         firstName,
         lastName,
         languageCode,
+        points: 0,         // or any initial value
+        characterUrl: "",  // will update below with default companion
       });
 
       await user.save({ session });
 
       // Create a UserInventory for the new user
-      const userInventory = new UserInventory({
+      let userInventory = new UserInventory({
         userId: user._id,
-        items: [] // Initialize with an empty items array or default items if needed
+        items: [],
       });
       await userInventory.save({ session });
+
+      // -- Grab the Default Companion (e.g., 'Starter Duck') --
+      const defaultCompanion = await ShopItem.findOne({ name: "Quacker the Explorer" }).session(session);
+      if (defaultCompanion) {
+        // Add default companion to user inventory:
+        //   - locked: false (it's free/unlocked by default)
+        //   - equipped: true
+        //   - level: 1
+        //   - pointsPerCycle: defaultCompanion.basePoints or your preferred logic
+        userInventory.items.push({
+          itemId: defaultCompanion._id,
+          level: 1,
+          pointsPerCycle: defaultCompanion.basePoints,
+          locked: false,
+          equipped: true,
+        });
+
+        // Set user's characterUrl = default companion's image
+        user.characterUrl = defaultCompanion.imageUrl;
+
+        // Save inventory and user
+        await userInventory.save({ session });
+        await user.save({ session });
+      } else {
+        console.warn(
+          "Default companion (e.g. 'Quacker the Explorer') not found in ShopItem collection. Please add it!"
+        );
+      }
 
       // Handle referral if referralCode is provided
       if (referralCode) {
@@ -85,7 +114,11 @@ router.post("/user", async (req, res) => {
           // Prevent self-referral
           if (!inviter._id.equals(user._id)) {
             // Check if they are already friends
-            const existingFriendship = await Friend.findOne({ userId: inviter._id, friendId: user._id }).session(session);
+            const existingFriendship = await Friend.findOne({
+              userId: inviter._id,
+              friendId: user._id,
+            }).session(session);
+
             if (!existingFriendship) {
               // Create bidirectional friendship
               await Friend.create(
@@ -99,8 +132,9 @@ router.post("/user", async (req, res) => {
               // Reward inviter and invitee
               inviter.friendsCount += 1;
               inviter.referralTokensEarned += 50000; // Reward for inviter
-              user.points += 50000; // Reward for invitee
+              user.points += 50000;                  // Reward for invitee
               inviter.points += 50000;
+
               // Save both users within the session
               await inviter.save({ session });
               await user.save({ session });
@@ -113,12 +147,12 @@ router.post("/user", async (req, res) => {
       await session.commitTransaction();
       session.endSession();
 
-      res.status(201).json({ message: "User saved successfully", user });
+      res.status(201).json({ message: "User created successfully", user });
     } catch (error) {
       // Abort the transaction in case of error
       await session.abortTransaction();
       session.endSession();
-      console.error("Error creating user with referral:", error);
+      console.error("Error creating user with referral/default companion:", error);
       res.status(500).json({ message: "Server error", error: error.message });
     }
   } catch (error) {
@@ -450,16 +484,15 @@ router.get("/shop", async (req, res) => {
     // Map shop items with locked/unlocked status and additional details
     const itemsWithStatus = shopItems.map((item) => {
       const inventoryItem = userInventory
-        ? userInventory.items.find(
-            (invItem) => invItem.itemId.toString() === item._id.toString()
-          )
+        ? userInventory.items.find((invItem) => invItem.itemId.toString() === item._id.toString())
         : null;
-
+    
       return {
         ...item.toObject(),
         locked: inventoryItem ? inventoryItem.locked : true,
-        level: inventoryItem ? inventoryItem.level : 0, // Default to 0 if not owned
-        pointsPerCycle: inventoryItem ? inventoryItem.pointsPerCycle : 0, // Default to 0
+        level: inventoryItem ? inventoryItem.level : 0,
+        pointsPerCycle: inventoryItem ? inventoryItem.pointsPerCycle : 0,
+        equipped: inventoryItem ? inventoryItem.equipped : false, // ✅ ADD EQUIPPED STATUS
         upgradeCost: inventoryItem
           ? Math.floor(item.baseCost * Math.pow(item.upgradeMultiplier, inventoryItem.level))
           : item.baseCost, // Calculate upgrade cost if owned, else base cost
@@ -563,6 +596,75 @@ router.post("/shop/upgrade", async (req, res) => {
   }
 });
 
+/**
+ * POST /shop/equip
+ * Equips a companion item for the user (telegramId).
+ */
+router.post("/shop/equip", async (req, res) => {
+  const { userId, itemId } = req.body; // userId is telegramId
+
+  try {
+    // 1. Fetch the user
+    const user = await User.findOne({ telegramId: userId });
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    // 2. Fetch the item from shop to ensure it is a companion
+    const shopItem = await ShopItem.findById(itemId);
+    if (!shopItem) return res.status(404).json({ message: "Shop item not found" });
+    if (shopItem.type !== "companion") {
+      return res
+        .status(400)
+        .json({ message: "Only companion items can be equipped." });
+    }
+
+    // 3. Get user inventory
+    const userInventory = await UserInventory.findOne({ userId: user._id });
+    if (!userInventory) {
+      return res.status(404).json({ message: "User inventory not found" });
+    }
+
+    // 4. Check if user owns this item
+    const inventoryItem = userInventory.items.find(
+      (invItem) => invItem.itemId.toString() === itemId
+    );
+    if (!inventoryItem) {
+      return res.status(400).json({ message: "User does not own this companion item." });
+    }
+    if (inventoryItem.locked) {
+      return res.status(400).json({ message: "Item is still locked, cannot equip." });
+    }
+
+    // 5. Mark all other companion items as unequipped
+    userInventory.items.forEach((invItem) => {
+      // We can look up the ShopItem if we want to confirm type=companion
+      if (invItem.equipped) {
+        invItem.equipped = false;
+      }
+    });
+
+    // 6. Equip the chosen item
+    inventoryItem.equipped = true;
+    await userInventory.save();
+
+    // 7. Update user's characterUrl
+    user.characterUrl = shopItem.imageUrl;
+    await user.save();
+
+    res.status(200).json({
+      message: "Companion equipped successfully",
+      characterUrl: user.characterUrl,
+      updatedItem: {
+        ...shopItem.toObject(),
+        equipped: inventoryItem.equipped,
+        locked: inventoryItem.locked,
+        level: inventoryItem.level,
+      },
+    });
+  } catch (error) {
+    console.error("Error equipping companion:", error);
+    res.status(500).json({ message: "Failed to equip companion" });
+  }
+});
 
 /**
  * POST /shop/purchase
@@ -687,9 +789,6 @@ router.post("/mine", async (req, res) => {
   }
 });
 
-
-const rateLimit = require("express-rate-limit");
-
 // Define rate limiter for taps
 const tapsLimiter = rateLimit({
   windowMs: 1 * 1000, // 1 second window
@@ -784,7 +883,23 @@ router.get("/referral/:telegramId", (req, res) => {
   res.status(200).json({ referralLink });
 });
 
-// routes.js (Modify the existing /daily-reward route)
+/**
+ * Define fixed 7-day rewards
+ */
+const fixedDailyRewards = [
+  { day: 1, reward: 100 },
+  { day: 2, reward: 150 },
+  { day: 3, reward: 200 },
+  { day: 4, reward: 250 },
+  { day: 5, reward: 300 },
+  { day: 6, reward: 350 },
+  { day: 7, reward: 500 }, // Maximum cycle reward
+];
+
+/**
+ * POST /daily-reward
+ * Allows a user to claim their daily reward based on a 24-hour timer.
+ */
 router.post("/daily-reward", async (req, res) => {
   try {
     const { telegramId } = req.body;
@@ -801,75 +916,53 @@ router.post("/daily-reward", async (req, res) => {
     }
 
     const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
-    let lastRewardDate = user.lastDailyReward
-      ? new Date(
-          user.lastDailyReward.getFullYear(),
-          user.lastDailyReward.getMonth(),
-          user.lastDailyReward.getDate()
-        )
-      : null;
+    if (user.lastClaimed) {
+      const timeDifference = now - user.lastClaimed; // Difference in milliseconds
+      const hoursDifference = timeDifference / (1000 * 60 * 60);
 
-    // Calculate the difference in days
-    const oneDayMs = 24 * 60 * 60 * 1000;
-    let daysDifference = lastRewardDate
-      ? Math.floor((today - lastRewardDate) / oneDayMs)
-      : null;
-
-    if (lastRewardDate) {
-      if (daysDifference === 0) {
+      if (hoursDifference < 24) {
+        const nextClaimTime = user.lastClaimed.getTime() + 86400 * 1000; // Exact next claim time in ms
+        const timeRemainingMs = nextClaimTime - Date.now();
+      
+        const hoursLeft = Math.floor(timeRemainingMs / (1000 * 60 * 60));
+        const minutesLeft = Math.floor((timeRemainingMs % (1000 * 60 * 60)) / (1000 * 60));
+      
         return res.status(400).json({
-          message: "Daily reward already claimed today.",
-          claimedDays: user.claimedDays,
+          message: `Daily reward already claimed. Try again in ${hoursLeft} hours and ${minutesLeft} minutes.`,
+          lastClaimed: user.lastClaimed,
         });
-      } else if (daysDifference === 1) {
-        // Continue the streak
-        user.dailyStreak += 1;
-      } else {
-        // Streak broken
-        user.dailyStreak = 1;
-        user.claimedDailyRewards = []; // Reset claimed days
+      }
+
+      if (hoursDifference >= 24 && hoursDifference < 48) {
+        // On-Time Claim: Increment the cycle
+        user.currentCycleDay += 1;
+        if (user.currentCycleDay > 7) {
+          user.currentCycleDay = 1; // Reset after day 7
+        }
+      } else if (hoursDifference >= 48) {
+        // Missed Claim: Reset the cycle
+        user.currentCycleDay = 1;
       }
     } else {
-      // First time claiming
-      user.dailyStreak = 1;
-      user.claimedDailyRewards = []; // Initialize claimed days
+      // First-time claiming
+      user.currentCycleDay = 1;
     }
 
-    // Determine reward based on streak
-    const rewardConfig = {
-      1: 100,
-      2: 150,
-      3: 200,
-      4: 250,
-      5: 300,
-      6: 350,
-      7: 500, // Maximum streak reward
-    };
+    const rewardForToday = fixedDailyRewards[user.currentCycleDay - 1].reward;
 
-    const streak = user.dailyStreak > 7 ? 7 : user.dailyStreak;
-    const rewardPoints = rewardConfig[streak] || 100; // Default to 100 if undefined
-
-    // Update user's points and lastDailyReward
-    user.points += rewardPoints;
-    user.lastDailyReward = now;
-
-    // Add today's date to claimedDailyRewards
-    const todayString = today.toISOString().split("T")[0];
-    if (!user.claimedDailyRewards.includes(todayString)) {
-      user.claimedDailyRewards.push(todayString);
-    }
+    // Update user's points and lastClaimed
+    user.points += rewardForToday;
+    user.lastClaimed = now;
 
     // Save the user
     await user.save();
 
     res.status(200).json({
-      message: `Daily reward claimed successfully! You received ${rewardPoints} points.`,
-      pointsEarned: rewardPoints,
+      message: `Daily reward claimed successfully! You received ${rewardForToday} points.`,
+      pointsEarned: rewardForToday,
       totalPoints: user.points,
-      currentStreak: user.dailyStreak,
-      claimedDays: user.claimedDailyRewards,
+      currentCycleDay: user.currentCycleDay,
     });
   } catch (error) {
     console.error("Error claiming daily reward:", error);
@@ -880,7 +973,11 @@ router.post("/daily-reward", async (req, res) => {
   }
 });
 
-// routes.js (Add this new route)
+/**
+ * GET /daily-rewards/:telegramId
+ * Retrieves the user's daily rewards status, including the current cycle day and claim eligibility,
+ * along with the list of daily rewards and their claimed statuses.
+ */
 router.get("/daily-rewards/:telegramId", async (req, res) => {
   try {
     const { telegramId } = req.params;
@@ -895,43 +992,43 @@ router.get("/daily-rewards/:telegramId", async (req, res) => {
       return res.status(404).json({ message: "User not found." });
     }
 
-    const today = new Date();
-    today.setHours(0, 0, 0, 0); // Normalize to start of day
+    const now = new Date();
 
-    // Define the 7 daily rewards
-    const rewardConfig = [
-      { day: 1, reward: 100 },
-      { day: 2, reward: 150 },
-      { day: 3, reward: 200 },
-      { day: 4, reward: 250 },
-      { day: 5, reward: 300 },
-      { day: 6, reward: 350 },
-      { day: 7, reward: 500 },
-    ];
+    let canClaim = false;
+    let timeLeft = null;
 
-    // Generate the past 7 days including today
-    const pastSevenDays = [];
-    for (let i = 6; i >= 0; i--) {
-      const date = new Date(today);
-      date.setDate(today.getDate() - i);
-      const dateString = date.toISOString().split("T")[0]; // "YYYY-MM-DD"
-      pastSevenDays.push(dateString);
+    if (user.lastClaimed) {
+      const timeDifference = now - user.lastClaimed; // Difference in milliseconds
+      const hoursDifference = timeDifference / (1000 * 60 * 60);
+
+      if (hoursDifference >= 24 && hoursDifference < 48) {
+        canClaim = true;
+      } else if (hoursDifference >= 48) {
+        canClaim = true; // User can claim but cycle will reset
+      } else {
+        const hoursLeft = 24 - Math.floor(hoursDifference);
+        const minutesLeft = Math.floor((24 - hoursDifference - hoursLeft) * 60);
+        timeLeft = `${hoursLeft}h ${minutesLeft}m`;
+      }
+    } else {
+      // User hasn't claimed yet
+      canClaim = true;
     }
 
-    // Create a Set of claimed dates for faster lookup
-    const claimedDatesSet = new Set(user.claimedDailyRewards || []);
-
-    // Map each day to its claimed status
-    const rewards = pastSevenDays.map((dateString, index) => ({
-      day: index + 1, // 1 to 7
-      date: dateString,
-      reward: rewardConfig[index].reward,
-      claimed: claimedDatesSet.has(dateString),
+    // Construct the rewards array based on currentCycleDay
+    const rewards = fixedDailyRewards.map((reward) => ({
+      day: reward.day,
+      reward: reward.reward,
+      claimed: reward.day < user.currentCycleDay,
+      date: now.toISOString().split("T")[0], // Assuming all rewards are for today
     }));
 
     res.status(200).json({
-      rewards,
-      currentStreak: user.dailyStreak || 0,
+      currentCycleDay: user.currentCycleDay || 0,
+      canClaim: canClaim,
+      timeLeft: timeLeft, // e.g., "5h 30m" or null
+      totalPoints: user.points,
+      rewards: rewards,
     });
   } catch (error) {
     console.error("Error fetching daily rewards:", error);

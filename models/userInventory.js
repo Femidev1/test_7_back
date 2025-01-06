@@ -7,7 +7,8 @@ const UserInventorySchema = new mongoose.Schema({
       itemId: { type: mongoose.Schema.Types.ObjectId, ref: "ShopItem" },
       level: { type: Number, default: 1 },
       pointsPerCycle: { type: Number, default: 0 },
-      locked: { type: Boolean, default: true } // Added field
+      locked: { type: Boolean, default: true },// Added field
+      equipped: { type: Boolean, default: false },
     }
   ]
 });

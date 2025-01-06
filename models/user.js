@@ -2,7 +2,7 @@
 const mongoose = require("mongoose");
 
 const UserSchema = new mongoose.Schema({
-  telegramId: { type: String, required: true, unique: true },
+  telegramId: { type: String, required: true, unique: true, index: true },
   username: { type: String },
   firstName: { type: String },
   lastName: { type: String },
@@ -11,10 +11,15 @@ const UserSchema = new mongoose.Schema({
   characterUrl: { type: String, default: "" },
   galaxyLevel: { type: Number, default: 1 }, // Add this line,
 
-  // Daily Reward Fields
-  lastDailyReward: { type: Date, default: null },
-  dailyStreak: { type: Number, default: 0 },
-  claimedDailyRewards: { type: [String], default: [] }, 
+   // Daily Rewards Fields
+   lastClaimed: {
+    type: Date,
+    default: null,
+  },
+  currentCycleDay: {
+    type: Number,
+    default: 0, // Starts at 0, incremented upon first claim
+  },
 
   invitedBy: {
     type: mongoose.Schema.Types.ObjectId,

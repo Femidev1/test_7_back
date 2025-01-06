@@ -1,12 +1,12 @@
+// index.js
+
 const express = require('express');
 const mongoose = require('mongoose');
 const bodyParser = require('body-parser');
 const cors = require('cors');
 const config = require('./config');
-const cron = require("node-cron");
 const routes = require("./routes"); // Import the centralized routes file
 require('./scheduler'); // Import the scheduler
-const { seedDailyQuests } = require("./utils/manualQuestSeeder");
 
 const app = express();
 
@@ -18,13 +18,6 @@ app.use(cors());
 mongoose.connect(config.mongoURI, { useNewUrlParser: true, useUnifiedTopology: true })
     .then(() => console.log('MongoDB Connected'))
     .catch(err => console.log('MongoDB Connection Error:', err));
-    
-// Run the seeder once every day at midnight
-cron.schedule("0 0 * * *", () => {
-  console.log("Running daily quest seeder at midnight...");
-  seedDailyQuests();
-});
-
 
 // Use the centralized routes file
 app.use("/api", routes); // All routes will be prefixed with /api
