@@ -27,15 +27,6 @@ app.use((req, res) => {
     res.status(404).json({ message: "Route not found" });
 });
 
-app.use(
-    cors({
-      origin: "http://localhost:5173", // Allow frontend origin
-      credentials: true, // Allow cookies and authentication headers
-      methods: "GET,POST,PUT,DELETE",
-      allowedHeaders: "Content-Type,Authorization",
-    })
-  );
-
 // Global Error Handler
 app.use((err, req, res, next) => {
     console.error("Global Error Handler:", err.stack);
