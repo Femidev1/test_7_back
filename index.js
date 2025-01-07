@@ -56,4 +56,4 @@ app.use((err, req, res, next) => {
 
 // Start Server
 const PORT = config.port || 5050; // Default to 5050 if not set
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`)); // retry
