@@ -14,6 +14,60 @@ const Friend = require("./models/friends");
 // Imported Utils
 const { seedDailyQuests } = require("./utils/manualQuestSeeder");
 
+// Generate Token Route
+app.post('/auth/generate-token', async (req, res) => {
+  const { token, telegramId } = req.body;
+
+  if (!token || !telegramId) {
+      return res.status(400).json({ message: 'Token and telegramId are required.' });
+  }
+
+  try {
+      const existingUser = await User.findOne({ telegramId });
+      if (!existingUser) {
+          const newUser = new User({
+              telegramId,
+              points: 0,
+          });
+          await newUser.save();
+      }
+
+      const newToken = new Token({ token, telegramId });
+      await newToken.save();
+
+      res.status(201).json({ message: 'Token generated and stored successfully.' });
+  } catch (error) {
+      console.error('Error generating/storing token:', error);
+      res.status(500).json({ message: 'Internal server error.' });
+  }
+});
+
+// Verify Token Route
+app.post('/auth/verify-token', async (req, res) => {
+  const { token } = req.body;
+
+  if (!token) {
+      return res.status(400).json({ message: 'Token is required.' });
+  }
+
+  try {
+      const tokenEntry = await Token.findOne({ token });
+
+      if (!tokenEntry) {
+          return res.status(400).json({ message: 'Invalid or expired token.' });
+      }
+
+      const { telegramId } = tokenEntry;
+
+      await Token.deleteOne({ token });
+
+      res.status(200).json({ telegramId });
+  } catch (error) {
+      console.error('Error verifying token:', error);
+      res.status(500).json({ message: 'Internal server error.' });
+  }
+});
+
 /**
  * GET /user/:telegramId
  * Retrieves a user by their Telegram ID.
