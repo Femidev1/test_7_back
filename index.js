@@ -9,25 +9,25 @@ const app = express();
 
 // CORS Configuration
 const allowedOrigins = [
-  "http://localhost:5173", // ✅ Local development
-  "https://test-7-frontdev.vercel.app", // ✅ Production frontend
-];
-
-const corsOptions = {
-  origin: function (origin, callback) {
-    console.log("CORS Request from:", origin); // Debugging
-
-    if (!origin || allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      console.error("🚨 CORS Blocked for:", origin);
-      callback(new Error("CORS not allowed for this origin"));
-    }
-  },
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
-  credentials: true, // ✅ Allow credentials (cookies, authentication headers)
-};
+    "http://localhost:5173", // ✅ Local development
+    "https://test-7-frontdev.vercel.app" // ✅ Production frontend
+  ];
+  
+  app.use(cors({
+    origin: function (origin, callback) {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        console.error(`🚨 CORS Blocked: ${origin}`);
+        callback(new Error("CORS not allowed for this origin"));
+      }
+    },
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+    credentials: true
+  }));
+  
+  app.options("*", cors()); // ✅ Handle preflight requests
 
 // Middleware
 app.use(cors(corsOptions)); // ✅ Enable CORS
