@@ -2,7 +2,7 @@
 
 const express = require('express');
 const mongoose = require('mongoose');
-const bodyParser = require('body-parser');
+const bodyParser = require('body-parser'); // Optional: Use express.json() instead
 const cors = require('cors');
 const config = require('./config');
 const routes = require("./routes"); // Import the centralized routes file
@@ -10,9 +10,17 @@ require('./scheduler'); // Import the scheduler
 
 const app = express();
 
+// CORS Configuration
+const corsOptions = {
+    origin: "http://localhost:5173", // Frontend URL
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+    credentials: true, // Allow credentials (cookies, authorization headers, etc.)
+};
+
 // Middleware
-app.use(bodyParser.json());
-app.use(cors());
+app.use(bodyParser.json()); // You can replace this with app.use(express.json()) if using Express >= 4.16
+app.use(cors(corsOptions));
 
 // MongoDB Connection
 mongoose.connect(config.mongoURI, { useNewUrlParser: true, useUnifiedTopology: true })
