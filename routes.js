@@ -10,12 +10,13 @@ const Quest = require("./models/quests");
 const ShopItem = require("./models/shopItem");
 const UserInventory = require("./models/userInventory");
 const Friend = require("./models/friends");
+const Token = require('./models/Token'); 
 
 // Imported Utils
 const { seedDailyQuests } = require("./utils/manualQuestSeeder");
 
 // Generate Token Route
-app.post('/auth/generate-token', async (req, res) => {
+router.post('/auth/generate-token', async (req, res) => {
   const { token, telegramId } = req.body;
 
   if (!token || !telegramId) {
@@ -23,27 +24,30 @@ app.post('/auth/generate-token', async (req, res) => {
   }
 
   try {
-      const existingUser = await User.findOne({ telegramId });
-      if (!existingUser) {
-          const newUser = new User({
+      // Check if user exists; if not, create a new user
+      let user = await User.findOne({ telegramId });
+      if (!user) {
+          user = new User({
               telegramId,
               points: 0,
+              // Add other user fields as necessary
           });
-          await newUser.save();
+          await user.save();
       }
 
+      // Create a new token entry
       const newToken = new Token({ token, telegramId });
       await newToken.save();
 
-      res.status(201).json({ message: 'Token generated and stored successfully.' });
+      return res.status(201).json({ message: 'Token generated and stored successfully.' });
   } catch (error) {
       console.error('Error generating/storing token:', error);
-      res.status(500).json({ message: 'Internal server error.' });
+      return res.status(500).json({ message: 'Internal server error.' });
   }
 });
 
 // Verify Token Route
-app.post('/auth/verify-token', async (req, res) => {
+router.post('/auth/verify-token', async (req, res) => {
   const { token } = req.body;
 
   if (!token) {
@@ -51,6 +55,7 @@ app.post('/auth/verify-token', async (req, res) => {
   }
 
   try {
+      // Find the token in the database
       const tokenEntry = await Token.findOne({ token });
 
       if (!tokenEntry) {
@@ -59,14 +64,16 @@ app.post('/auth/verify-token', async (req, res) => {
 
       const { telegramId } = tokenEntry;
 
+      // Optionally, delete the token to make it single-use
       await Token.deleteOne({ token });
 
-      res.status(200).json({ telegramId });
+      return res.status(200).json({ telegramId });
   } catch (error) {
       console.error('Error verifying token:', error);
-      res.status(500).json({ message: 'Internal server error.' });
+      return res.status(500).json({ message: 'Internal server error.' });
   }
 });
+
 
 /**
  * GET /user/:telegramId
