@@ -1,5 +1,3 @@
-// index.js
-
 const express = require('express');
 const mongoose = require('mongoose');
 const bodyParser = require('body-parser'); // Optional: Can use express.json() instead
@@ -12,7 +10,7 @@ const app = express();
 
 // CORS Configuration
 const corsOptions = {
-    origin: "http://localhost:5173", // Frontend URL
+    origin: "https://test-7-frontdev.vercel.app", // Updated Frontend URL
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
     credentials: true, // Allow credentials (cookies, authorization headers, etc.)
