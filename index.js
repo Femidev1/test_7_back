@@ -2,7 +2,7 @@
 
 const express = require('express');
 const mongoose = require('mongoose');
-const bodyParser = require('body-parser'); // Optional: Use express.json() instead
+const bodyParser = require('body-parser'); // Optional: Can use express.json() instead
 const cors = require('cors');
 const config = require('./config');
 const routes = require("./routes"); // Import the centralized routes file
@@ -19,7 +19,7 @@ const corsOptions = {
 };
 
 // Middleware
-app.use(bodyParser.json()); // You can replace this with app.use(express.json()) if using Express >= 4.16
+app.use(bodyParser.json()); // Alternatively, use app.use(express.json()) if using Express >=4.16
 app.use(cors(corsOptions));
 
 // MongoDB Connection
