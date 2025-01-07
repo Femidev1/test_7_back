@@ -15,15 +15,18 @@ const allowedOrigins = [
 
 const corsOptions = {
   origin: function (origin, callback) {
+    console.log("CORS Request from:", origin); // Debugging
+
     if (!origin || allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
+      console.error("🚨 CORS Blocked for:", origin);
       callback(new Error("CORS not allowed for this origin"));
     }
   },
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
-  credentials: true, // Allow credentials (cookies, authorization headers, etc.)
+  credentials: true, // ✅ Allow credentials (cookies, authentication headers)
 };
 
 // Middleware
@@ -56,4 +59,4 @@ app.use((err, req, res, next) => {
 
 // Start Server
 const PORT = config.port || 5050; // Default to 5050 if not set
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`)); // retry
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
