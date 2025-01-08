@@ -75,6 +75,7 @@ router.post('/auth/verify-token', async (req, res) => {
 });
 
 
+
 /**
  * GET /user/:telegramId
  * Retrieves a user by their Telegram ID.
@@ -90,6 +91,7 @@ router.get("/user/:telegramId", async (req, res) => {
     // Find user by telegramId
     const user = await User.findOne({ telegramId });
     if (!user) {
+      console.log(`User with Telegram ID ${telegramId} not found.`);
       return res.status(404).json({ message: "User not found." });
     }
 
@@ -102,20 +104,26 @@ router.get("/user/:telegramId", async (req, res) => {
 
 /**
  * POST /user
- * Creates a new user with Telegram details in the existing User collection.
- * Handles referral logic if referralCode is provided, and also assigns a default companion.
+ * Creates a new user with Telegram details.
+ * If the user already exists, returns the existing user.
  */
 router.post("/user", async (req, res) => {
   try {
     const { telegramId, username, firstName, lastName, languageCode, referralCode } = req.body;
 
-    // Check if user already exists
-    let user = await User.findOne({ telegramId });
-    if (user) {
-      return res.status(400).json({ message: "User already exists" });
+    if (!telegramId) {
+      return res.status(400).json({ message: "Telegram ID is required." });
     }
 
-    // Start a session for transaction
+    // Check if user already exists
+    let user = await User.findOne({ telegramId });
+
+    if (user) {
+      console.log(`User with Telegram ID ${telegramId} already exists.`);
+      return res.status(200).json({ message: "User already exists.", user });
+    }
+
+    // Start a transaction session
     const session = await mongoose.startSession();
     session.startTransaction();
 
@@ -123,31 +131,26 @@ router.post("/user", async (req, res) => {
       // Create new user
       user = new User({
         telegramId,
-        username,
-        firstName,
-        lastName,
-        languageCode,
-        points: 0,         
-        characterUrl: "",  
+        username: username || "Unknown",
+        firstName: firstName || "NoFirstName",
+        lastName: lastName || "NoLastName",
+        languageCode: languageCode || "en",
+        points: 0,
+        characterUrl: "",
       });
 
       await user.save({ session });
 
       // Create a UserInventory for the new user
-      let userInventory = new UserInventory({
+      const userInventory = new UserInventory({
         userId: user._id,
         items: [],
       });
       await userInventory.save({ session });
 
-      // -- Grab the Default Companion (e.g., 'Starter Duck') --
+      // Assign the default companion (e.g., 'Quacker the Explorer')
       const defaultCompanion = await ShopItem.findOne({ name: "Quacker the Explorer" }).session(session);
       if (defaultCompanion) {
-        // Add default companion to user inventory:
-        //   - locked: false (it's free/unlocked by default)
-        //   - equipped: true
-        //   - level: 1
-        //   - pointsPerCycle: defaultCompanion.basePoints or your preferred logic
         userInventory.items.push({
           itemId: defaultCompanion._id,
           level: 1,
@@ -156,32 +159,24 @@ router.post("/user", async (req, res) => {
           equipped: true,
         });
 
-        // Set user's characterUrl = default companion's image
         user.characterUrl = defaultCompanion.imageUrl;
-
-        // Save inventory and user
         await userInventory.save({ session });
         await user.save({ session });
       } else {
-        console.warn(
-          "Default companion (e.g. 'Quacker the Explorer') not found in ShopItem collection. Please add it!"
-        );
+        console.warn("Default companion 'Quacker the Explorer' not found in ShopItem collection.");
       }
 
       // Handle referral if referralCode is provided
       if (referralCode) {
         const inviter = await User.findOne({ telegramId: referralCode }).session(session);
         if (inviter) {
-          // Prevent self-referral
           if (!inviter._id.equals(user._id)) {
-            // Check if they are already friends
             const existingFriendship = await Friend.findOne({
               userId: inviter._id,
               friendId: user._id,
             }).session(session);
 
             if (!existingFriendship) {
-              // Create bidirectional friendship
               await Friend.create(
                 [
                   { userId: inviter._id, friendId: user._id },
@@ -190,13 +185,11 @@ router.post("/user", async (req, res) => {
                 { session }
               );
 
-              // Reward inviter and invitee
               inviter.friendsCount += 1;
-              inviter.referralTokensEarned += 50000; // Reward for inviter
-              user.points += 50000;                  // Reward for invitee
+              inviter.referralTokensEarned += 50000;
+              user.points += 50000;
               inviter.points += 50000;
 
-              // Save both users within the session
               await inviter.save({ session });
               await user.save({ session });
             }
@@ -208,20 +201,19 @@ router.post("/user", async (req, res) => {
       await session.commitTransaction();
       session.endSession();
 
+      console.log(`User created successfully: ${telegramId}`);
       res.status(201).json({ message: "User created successfully", user });
     } catch (error) {
-      // Abort the transaction in case of error
       await session.abortTransaction();
       session.endSession();
-      console.error("Error creating user with referral/default companion:", error);
+      console.error("Error creating user:", error);
       res.status(500).json({ message: "Server error", error: error.message });
     }
   } catch (error) {
     console.error("Error creating user:", error);
-    res.status(500).json({ message: "Server error", error });
+    res.status(500).json({ message: "Server error", error: error.message });
   }
 });
-
 /**
  * GET /leaderboard
  * Returns top users sorted by points, default limit=100.
@@ -853,7 +845,7 @@ router.post("/mine", async (req, res) => {
 // Define rate limiter for taps
 const tapsLimiter = rateLimit({
   windowMs: 1 * 1000, // 1 second window
-  max: 60, // limit each IP to 60 requests per windowMs
+  max: 1000, // limit each IP to 60 requests per windowMs
   message: "Too many taps from this IP, please try again later.",
 });
 
