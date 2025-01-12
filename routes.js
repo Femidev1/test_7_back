@@ -74,8 +74,6 @@ router.post('/auth/verify-token', async (req, res) => {
   }
 });
 
-
-
 /**
  * GET /user/:telegramId
  * Retrieves a user by their Telegram ID.
@@ -117,7 +115,6 @@ router.post("/user", async (req, res) => {
 
     // Check if user already exists
     let user = await User.findOne({ telegramId });
-
     if (user) {
       console.log(`User with Telegram ID ${telegramId} already exists.`);
       return res.status(200).json({ message: "User already exists.", user });
@@ -128,7 +125,7 @@ router.post("/user", async (req, res) => {
     session.startTransaction();
 
     try {
-      // Create new user
+      // 1) Create the new user
       user = new User({
         telegramId,
         username: username || "Unknown",
@@ -141,14 +138,14 @@ router.post("/user", async (req, res) => {
 
       await user.save({ session });
 
-      // Create a UserInventory for the new user
+      // 2) Create a UserInventory for the new user
       const userInventory = new UserInventory({
         userId: user._id,
         items: [],
       });
       await userInventory.save({ session });
 
-      // Assign the default companion (e.g., 'Quacker the Explorer')
+      // 3) Assign the default companion (e.g., "Quacker the Explorer")
       const defaultCompanion = await ShopItem.findOne({ name: "Quacker the Explorer" }).session(session);
       if (defaultCompanion) {
         userInventory.items.push({
@@ -166,17 +163,20 @@ router.post("/user", async (req, res) => {
         console.warn("Default companion 'Quacker the Explorer' not found in ShopItem collection.");
       }
 
-      // Handle referral if referralCode is provided
+      // 4) Handle referral if referralCode is provided
       if (referralCode) {
         const inviter = await User.findOne({ telegramId: referralCode }).session(session);
         if (inviter) {
+          // Avoid self-invite
           if (!inviter._id.equals(user._id)) {
+            // Check if a friendship already exists
             const existingFriendship = await Friend.findOne({
               userId: inviter._id,
               friendId: user._id,
             }).session(session);
 
             if (!existingFriendship) {
+              // Create a two-way friendship doc
               await Friend.create(
                 [
                   { userId: inviter._id, friendId: user._id },
@@ -185,10 +185,18 @@ router.post("/user", async (req, res) => {
                 { session }
               );
 
+              // 4a) Increase inviter's friend count by 1
               inviter.friendsCount += 1;
-              inviter.referralTokensEarned += 50000;
+
+              // 4b) Award 50k points to both
               user.points += 50000;
               inviter.points += 50000;
+
+              // 4c) Increase inviter's referralTokensEarned by 50k
+              inviter.referralTokensEarned += 50000;
+
+              // 4d) Mark this new user's "invitedBy"
+              user.invitedBy = inviter._id;
 
               await inviter.save({ session });
               await user.save({ session });
@@ -204,6 +212,7 @@ router.post("/user", async (req, res) => {
       console.log(`User created successfully: ${telegramId}`);
       res.status(201).json({ message: "User created successfully", user });
     } catch (error) {
+      // If anything fails inside the transaction, roll back
       await session.abortTransaction();
       session.endSession();
       console.error("Error creating user:", error);
@@ -214,6 +223,7 @@ router.post("/user", async (req, res) => {
     res.status(500).json({ message: "Server error", error: error.message });
   }
 });
+
 /**
  * GET /leaderboard
  * Returns top users sorted by points, default limit=100.
